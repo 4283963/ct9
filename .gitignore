@@ -1,35 +1,24 @@
-# Mac 系统垃圾文件
-.DS_Store
-.AppleDouble
-.LSOverride
-.Icon
-._*
-
-# Windows 系统垃圾文件
-Thumbs.db
-desktop.ini
-
-# 日志与临时文件
+# Logs
+logs
 *.log
-logs/
-*.tmp
-*.bak
-*.mp4
-# 开发工具缓存 (IDEA / VSCode)
-.idea/
-.vscode/
-*.suo
-*.user
-*.workspace
-.history/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
 
-# 常见依赖与构建输出
-node_modules/
-dist/
-build/
-out/
-target/
-bin/
-obj/
-__pycache__/
-*.pyc
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
