@@ -41,4 +41,33 @@ export interface SimulateResponse {
   spaceLabels: number[];
 }
 
-export type SimStatus = "idle" | "computing" | "ready" | "error";
+export type TaskStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface TaskInfo {
+  taskId: string;
+  status: TaskStatus;
+  progress: number;
+  message: string;
+  createdAt: number;
+  startedAt: number | null;
+  completedAt: number | null;
+  hasResult: boolean;
+  error: string | null;
+}
+
+export interface TaskResultResponse {
+  task: TaskInfo;
+  result: SimulateResponse;
+}
+
+export type SimStatus =
+  | "idle"
+  | "computing-sync"
+  | "computing-async"
+  | "ready"
+  | "error";

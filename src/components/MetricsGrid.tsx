@@ -81,7 +81,8 @@ function formatTime(v: number) {
 export default function MetricsGrid() {
   const { result, status } = useSimStore();
   const m = result?.metrics;
-  const loading = status === "computing";
+  const loading =
+    status === "computing-sync" || status === "computing-async";
   const empty = status === "idle" || status === "error";
 
   return (

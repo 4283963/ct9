@@ -1,5 +1,6 @@
 import { cn } from "@/lib/utils";
 import { useSimStore } from "@/store/useSimStore";
+import { isLargeTask } from "@/api/client";
 import {
   Sun,
   Thermometer,
@@ -12,6 +13,9 @@ import {
   Play,
   RotateCcw,
   Loader2,
+  X,
+  Server,
+  Cpu,
 } from "lucide-react";
 
 interface SliderFieldProps {
@@ -80,7 +84,7 @@ interface SectionProps {
   defaultOpen?: boolean;
 }
 
-function ParamSection({ title, children, defaultOpen = true }: SectionProps) {
+function ParamSection({ title, children }: SectionProps) {
   return (
     <div className="border border-border-subtle rounded-md overflow-hidden">
       <div className="px-3 py-2 bg-bg-panel2/70 border-b border-border-subtle flex items-center justify-between">
@@ -94,8 +98,24 @@ function ParamSection({ title, children, defaultOpen = true }: SectionProps) {
 }
 
 export default function ParameterPanel() {
-  const { params, setParams, resetParams, runSim, status } = useSimStore();
-  const isComputing = status === "computing";
+  const {
+    params,
+    setParams,
+    resetParams,
+    runSim,
+    cancelSim,
+    status,
+    progress,
+    progressMessage,
+    error,
+  } = useSimStore();
+
+  const computing =
+    status === "computing-sync" || status === "computing-async";
+  const isAsync = status === "computing-async";
+  const large = isLargeTask(params);
+
+  const pct = Math.max(0, Math.min(1, progress)) * 100;
 
   return (
     <aside className="h-full w-80 flex flex-col bg-bg-panel2/60 backdrop-blur border-r border-border-subtle">
@@ -110,6 +130,75 @@ export default function ParameterPanel() {
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 space-y-3">
+        {computing && (
+          <div
+            className={cn(
+              "border rounded-md p-3 space-y-2",
+              isAsync
+                ? "border-accent-cyan/40 bg-accent-cyan/5"
+                : "border-accent-amber/40 bg-accent-amber/5"
+            )}
+          >
+            <div className="flex items-center justify-between text-xs">
+              <div className="flex items-center gap-1.5 font-mono">
+                {isAsync ? (
+                  <Server className="w-3.5 h-3.5 text-accent-cyan" />
+                ) : (
+                  <Cpu className="w-3.5 h-3.5 text-accent-amber" />
+                )}
+                <span className={isAsync ? "text-accent-cyan" : "text-accent-amber"}>
+                  {isAsync ? "异步任务模式" : "同步求解模式"}
+                </span>
+              </div>
+              <span className="font-mono text-mono-200">
+                {pct.toFixed(0)}%
+              </span>
+            </div>
+            <div className="relative h-1.5 rounded-full bg-mono-600 overflow-hidden">
+              <div
+                className={cn(
+                  "h-full transition-all duration-300",
+                  isAsync ? "bg-accent-cyan" : "bg-accent-amber"
+                )}
+                style={{ width: `${pct}%` }}
+              />
+              {isAsync && (
+                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent animate-pulse" />
+              )}
+            </div>
+            <div className="text-[11px] font-mono text-mono-400 truncate">
+              {progressMessage || "…"}
+            </div>
+            {isAsync && (
+              <button
+                onClick={() => cancelSim()}
+                className="w-full mt-1 py-1.5 rounded-md font-mono text-xs border border-accent-rose/40 text-accent-rose hover:bg-accent-rose/10 flex items-center justify-center gap-1.5 transition-all"
+              >
+                <X className="w-3.5 h-3.5" />
+                取消任务
+              </button>
+            )}
+          </div>
+        )}
+
+        {!computing && large && (
+          <div className="border border-accent-cyan/30 rounded-md p-2.5 flex items-start gap-2 bg-accent-cyan/5">
+            <Server className="w-4 h-4 text-accent-cyan mt-0.5 shrink-0" />
+            <div className="text-[11px] font-mono text-mono-300 leading-relaxed">
+              检测到大规模仿真参数，将自动使用<span className="text-accent-cyan"> 异步任务队列 </span>
+              进行后台计算，避免 504 网关超时。
+            </div>
+          </div>
+        )}
+
+        {status === "error" && error && (
+          <div className="border border-accent-rose/40 rounded-md p-2.5 bg-accent-rose/5">
+            <div className="text-[11px] font-mono text-accent-rose">
+              ERROR · {error}
+            </div>
+          </div>
+        )}
+
         <ParamSection title="环境条件">
           <SliderField
             label="环境温度"
@@ -162,7 +251,7 @@ export default function ParameterPanel() {
             label="空间网格节点"
             value={params.nodes}
             min={10}
-            max={200}
+            max={500}
             step={1}
             icon={<Grid3x3 className="w-3.5 h-3.5" />}
             onChange={(v) => setParams({ nodes: Math.round(v) })}
@@ -175,18 +264,22 @@ export default function ParameterPanel() {
             label="总仿真时长"
             value={params.totalTime}
             min={30}
-            max={3600}
+            max={86400}
             step={10}
             unit="s"
             icon={<Clock className="w-3.5 h-3.5" />}
             onChange={(v) => setParams({ totalTime: v })}
-            format={(v) => v.toFixed(0)}
+            format={(v) => {
+              if (v >= 3600) return `${(v / 3600).toFixed(1)} h`;
+              if (v >= 60) return `${(v / 60).toFixed(1)} min`;
+              return `${v.toFixed(0)} s`;
+            }}
           />
           <SliderField
             label="输出时间步长"
             value={params.timeStep}
             min={1}
-            max={60}
+            max={360}
             step={1}
             unit="s"
             icon={<Clock className="w-3.5 h-3.5" />}
@@ -234,28 +327,30 @@ export default function ParameterPanel() {
       <div className="p-3 border-t border-border-subtle space-y-2">
         <button
           onClick={() => runSim()}
-          disabled={isComputing}
+          disabled={computing}
           className={cn(
             "w-full py-2.5 rounded-md font-mono text-sm font-semibold flex items-center justify-center gap-2 transition-all",
-            "bg-accent-cyan/90 text-bg-deep hover:bg-accent-cyan hover:shadow-glow-cyan",
+            large
+              ? "bg-accent-cyan/90 text-bg-deep hover:bg-accent-cyan hover:shadow-glow-cyan"
+              : "bg-accent-amber/90 text-bg-deep hover:bg-accent-amber hover:shadow-glow-amber",
             "disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none"
           )}
         >
-          {isComputing ? (
+          {computing ? (
             <>
               <Loader2 className="w-4 h-4 animate-spin" />
-              计算中…
+              {isAsync ? "后台计算中…" : "计算中…"}
             </>
           ) : (
             <>
               <Play className="w-4 h-4 fill-current" />
-              运行仿真
+              {large ? "运行后台仿真" : "运行仿真"}
             </>
           )}
         </button>
         <button
           onClick={resetParams}
-          disabled={isComputing}
+          disabled={computing}
           className="w-full py-2 rounded-md font-mono text-xs border border-mono-500 text-mono-300 hover:text-mono-100 hover:border-mono-400 flex items-center justify-center gap-1.5 transition-all"
         >
           <RotateCcw className="w-3.5 h-3.5" />
