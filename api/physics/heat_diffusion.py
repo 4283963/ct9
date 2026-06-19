@@ -1,14 +1,20 @@
 """
-一维热扩散偏微分方程求解器（优化版）
+一维热扩散偏微分方程求解器（变系数版）
 =================================================
 
-求解方程：∂T/∂t = α ∂²T/∂x² + Q(x) - h_v * (T - T_amb)
+求解方程：∂T/∂t = ∂/∂x [α(x) ∂T/∂x] + Q(x) − h_v·(T − T_amb)
 
-针对大规模 / 长时间仿真的优化：
+支持位置相关的热扩散系数 α(x)，可模拟材质瑕疵（鸟粪、裂纹等导致的局部
+热传导系数降低）。
+
+变系数离散采用**有限体积法 + 调和平均界面系数**，在瑕疵区域系数突变时
+保持数值稳定性和守恒性。
+
+大规模 / 长时间仿真优化：
   1. **双方法路由**：
      - 规模小：沿用 SciPy `solve_ivp` (RK45)，精度高
-     - 规模大：切换到 Crank-Nicolson 隐式格式 + `scipy.linalg.solve_banded`
-       对长时间步长无条件稳定，大幅减少推进步数
+     - 规模大：Backward-Euler 全隐式 + `scipy.linalg.solve_banded`
+       无条件 A-稳定，无寄生振荡，大步长推进
   2. 求解过程支持 `progress_cb` 回调与 `cancel_event`
   3. 向量化 RHS，消除 Python 层循环
   4. 稀疏三对角矩阵求解（带宽仅 1），O(N) 复杂度
@@ -29,43 +35,76 @@ ProgressCb = Callable[[float, str], None]
 class DiffusionConfig:
     length: float
     nodes: int
-    alpha: float
-    h_over_k: float
-    h_volumetric: float
+    alpha: np.ndarray        # 位置相关热扩散系数 (N,)
+    h_surf: float           # 表面对流换热系数 W/m²·K
+    rho_c: float            # 体积热容 J/m³·K
+    h_volumetric: float     # 体积散热系数 s⁻¹
     ambient_temp: float
 
 
 # ---------------------------------------------------------------------------
-# SciPy solve_ivp 向量化 RHS（保留高精度模式）
+# 辅助：界面热扩散系数（调和平均，适用于变系数突变场景）
+# ---------------------------------------------------------------------------
+def _harmonic_interface_alpha(alpha: np.ndarray) -> np.ndarray:
+    """
+    计算节点界面 i+½ 处的调和平均热扩散系数：
+        α_{i+½} = 2 * α_i * α_{i+1} / (α_i + α_{i+1})
+
+    当相邻节点导热系数差异较大（比如瑕疵区域），调和平均比算术平均
+    在物理上更准确，保证热流守恒。
+
+    返回 shape = (N-1,)，其中 result[i] = α_{i+½}
+    """
+    return 2.0 * alpha[:-1] * alpha[1:] / (alpha[:-1] + alpha[1:] + 1e-300)
+
+
+# ---------------------------------------------------------------------------
+# SciPy solve_ivp 向量化 RHS（保留高精度模式，支持变系数）
 # ---------------------------------------------------------------------------
 def _build_rhs_vectorized(config: DiffusionConfig, Q: np.ndarray):
     """向量化构造 ODE 右手边：避免对 Python 循环依赖。"""
     dx = config.length / (config.nodes - 1)
     dx2 = dx * dx
     N = config.nodes
-    hk = config.h_over_k
     T_amb = config.ambient_temp
     alpha = config.alpha
     h_v = config.h_volumetric
+    h_surf = config.h_surf
+    rho_c = config.rho_c
+
+    # 预计算界面 α_{i+½}
+    alpha_iface = _harmonic_interface_alpha(alpha)  # (N-1,)
+
+    # 边界 Robin 系数
+    s0 = 2.0 * h_surf / (rho_c * dx)   # 左边界对流项系数
+    sN = 2.0 * h_surf / (rho_c * dx)   # 右边界对流项系数
 
     def rhs(t, T):
         dT = np.empty_like(T)
-        # 内部节点 (1..N-2)
+        # 内部节点 (1..N-2)：
+        #   dT[i]/dt = [α_{i-½}·(T[i-1] - T[i]) + α_{i+½}·(T[i+1] - T[i])] / dx²
+        #             + Q[i] - h_v·(T[i] - T_amb)
         dT[1:-1] = (
-            alpha * (T[2:] - 2.0 * T[1:-1] + T[:-2]) / dx2
-            + Q[1:-1]
-            - h_v * (T[1:-1] - T_amb)
-        )
-        # 边界：Robin 条件虚拟节点
-        T_left_virtual = (T[1] + hk * dx * T_amb) / (1.0 + hk * dx)
+            alpha_iface[:-1] * (T[:-2] - T[1:-1])
+            + alpha_iface[1:] * (T[2:] - T[1:-1])
+        ) / dx2 + Q[1:-1] - h_v * (T[1:-1] - T_amb)
+
+        # 左边界 i=0（半节点法）：
+        #   dT[0]/dt = 2·α_{½}/dx²·(T[1] - T[0])
+        #              + s0·(T_amb - T[0]) + Q[0] - h_v·(T[0] - T_amb)
         dT[0] = (
-            alpha * (T[1] - 2.0 * T[0] + T_left_virtual) / dx2
+            2.0 * alpha_iface[0] / dx2 * (T[1] - T[0])
+            + s0 * (T_amb - T[0])
             + Q[0]
             - h_v * (T[0] - T_amb)
         )
-        T_right_virtual = (T[-2] + hk * dx * T_amb) / (1.0 + hk * dx)
+
+        # 右边界 i=N-1（半节点法）：
+        #   dT[N-1]/dt = 2·α_{N-3/2}/dx²·(T[N-2] - T[N-1])
+        #                + sN·(T_amb - T[N-1]) + Q[N-1] - h_v·(T[N-1] - T_amb)
         dT[-1] = (
-            alpha * (T[-2] - 2.0 * T[-1] + T_right_virtual) / dx2
+            2.0 * alpha_iface[-1] / dx2 * (T[-2] - T[-1])
+            + sN * (T_amb - T[-1])
             + Q[-1]
             - h_v * (T[-1] - T_amb)
         )
@@ -75,33 +114,33 @@ def _build_rhs_vectorized(config: DiffusionConfig, Q: np.ndarray):
 
 
 # ---------------------------------------------------------------------------
-# Crank-Nicolson 隐式推进（大规模 / 长时间演化用）
+# Backward-Euler 全隐式推进（大规模用，支持变系数）
 # ---------------------------------------------------------------------------
 def _build_backward_euler_system(config: DiffusionConfig, Q: np.ndarray, dt: float):
     """
-    组装全隐式 Backward-Euler 三对角系统：
+    组装全隐式 Backward-Euler 三对角系统（变系数）：
 
-        (I - dt·L + dt·h_v·I) T_{n+1} = T_n + dt·Q + dt·h_v·T_amb
+        A * T_{n+1} = T_n + dt·Q + dt·T_amb·(h_v + s_boundary)
 
-    其中 L(T) = α ∂²T/∂x²（含 Robin 边界虚拟节点嵌入）。
+    记 α_iface[i] = α_{i+½}，
 
-    Backward Euler 对任意 dt 绝对稳定（A-稳定），且无 Crank-Nicolson
-    特有的高波数寄生振荡，非常适合长时间 / 大步长演化。
+    内部节点 i ∈ [1, N-2]：
+        - dt·α_{i-½}/dx² · T_{i-1}
+        + [1 + dt·(α_{i-½}+α_{i+½})/dx² + dt·h_v] · T_i
+        - dt·α_{i+½}/dx² · T_{i+1}
+            = T_i^n + dt·Q_i + dt·h_v·T_amb
 
-    记 r̃ = α·dt/dx², s̃ = h_v·dt,
-        a = 1/(1+hk·dx),  b = a·hk·dx
+    左边界 i=0：
+        [1 + 2dt·α_{½}/dx² + dt·(s0 + h_v)] · T_0
+        - 2dt·α_{½}/dx² · T_1
+            = T_0^n + dt·Q_0 + dt·T_amb·(h_v + s0)
+        其中 s0 = 2·h_surf/(ρ_c·dx)
 
-    内部节点 (1..N-2):
-        (1+2r̃+s̃) T_i  -  r̃ T_{i-1}  -  r̃ T_{i+1}
-            = T_i^n  +  dt·Q_i  +  s̃·T_amb
-
-    左边界 (i=0):
-        (1+2r̃+s̃) T_0  -  r̃(1+a) T_1
-            = T_0^n  +  dt·Q_0  +  s̃·T_amb  +  r̃·b·T_amb
-
-    右边界 (i=N-1):
-        (1+2r̃+s̃) T_{N-1}  -  r̃(1+a) T_{N-2}
-            = T_{N-1}^n  +  dt·Q_{N-1}  +  s̃·T_amb  +  r̃·b·T_amb
+    右边界 i=N-1：
+        [1 + 2dt·α_{N-3/2}/dx² + dt·(sN + h_v)] · T_{N-1}
+        - 2dt·α_{N-3/2}/dx² · T_{N-2}
+            = T_{N-1}^n + dt·Q_{N-1} + dt·T_amb·(h_v + sN)
+        其中 sN = 2·h_surf/(ρ_c·dx)
 
     返回 (A_banded, C_vec)，A_banded 为 solve_banded((l=1, u=1)) 所需的
     (3, N) 存储格式：
@@ -114,16 +153,18 @@ def _build_backward_euler_system(config: DiffusionConfig, Q: np.ndarray, dt: flo
     dx = config.length / (config.nodes - 1)
     dx2 = dx * dx
     N = config.nodes
-    hk = config.h_over_k
     T_amb = config.ambient_temp
     alpha = config.alpha
     h_v = config.h_volumetric
-    r = alpha * dt / dx2      # r̃
-    s = h_v * dt              # s̃
+    h_surf = config.h_surf
+    rho_c = config.rho_c
 
-    a_rb = 1.0 / (1.0 + hk * dx)
-    b_rb = a_rb * hk * dx
-    one_plus_a = 1.0 + a_rb
+    # 界面 α_{i+½}
+    alpha_iface = _harmonic_interface_alpha(alpha)  # (N-1,)
+
+    # 边界 Robin 系数
+    s0 = 2.0 * h_surf / (rho_c * dx)
+    sN = 2.0 * h_surf / (rho_c * dx)
 
     # solve_banded((l=1, u=1), ab, b)
     #   ab[0, j] = A[j-1, j]   (上对角，j from 1..N-1)
@@ -132,52 +173,34 @@ def _build_backward_euler_system(config: DiffusionConfig, Q: np.ndarray, dt: flo
     A_banded = np.zeros((3, N), dtype=float)
     C_vec = np.zeros(N, dtype=float)
 
-    diag_center = 1.0 + 2.0 * r + s
+    # 公共项 r_i = α_{i+½}/dx²
+    r = alpha_iface / dx2   # (N-1,)
 
-    # 内部节点 i in [1, N-2]
-    #   A[i, i-1] = -r       → ab[2, i-1]
-    #   A[i, i]   = 1+2r+s   → ab[1, i]
-    #   A[i, i+1] = -r       → ab[0, i+1]
+    # --- 左边界 i=0 ---
+    # A[0,0] = 1 + 2·dt·r[0] + dt·(s0 + h_v)
+    # A[0,1] = -2·dt·r[0]
+    A_banded[1, 0] = 1.0 + 2.0 * dt * r[0] + dt * (s0 + h_v)
+    A_banded[0, 1] = -2.0 * dt * r[0]
+    C_vec[0] = dt * Q[0] + dt * T_amb * (h_v + s0)
+
+    # --- 内部节点 i ∈ [1, N-2] ---
+    # A[i,i-1] = -dt·r[i-1]          → ab[2, i-1]
+    # A[i,i]   = 1 + dt·(r[i-1]+r[i]) + dt·h_v → ab[1, i]
+    # A[i,i+1] = -dt·r[i]            → ab[0, i+1]
     for i in range(1, N - 1):
-        A_banded[2, i - 1] = -r
-        A_banded[1, i] = diag_center
-        A_banded[0, i + 1] = -r
-        C_vec[i] = s * T_amb + dt * Q[i]
+        A_banded[2, i - 1] = -dt * r[i - 1]
+        A_banded[1, i] = 1.0 + dt * (r[i - 1] + r[i]) + dt * h_v
+        A_banded[0, i + 1] = -dt * r[i]
+        C_vec[i] = dt * Q[i] + dt * h_v * T_amb
 
-    # 左边界 i=0
-    #   A[0, 0] = 1+2r+s             → ab[1, 0]
-    #   A[0, 1] = -r * (1+a)         → ab[0, 1]
-    A_banded[1, 0] = diag_center
-    A_banded[0, 1] = -r * one_plus_a
-    C_vec[0] = s * T_amb + dt * Q[0] + r * b_rb * T_amb
-
-    # 右边界 i=N-1
-    #   A[N-1, N-1] = 1+2r+s         → ab[1, N-1]
-    #   A[N-1, N-2] = -r * (1+a)     → ab[2, N-2]
-    A_banded[1, N - 1] = diag_center
-    A_banded[2, N - 2] = -r * one_plus_a
-    C_vec[N - 1] = s * T_amb + dt * Q[N - 1] + r * b_rb * T_amb
+    # --- 右边界 i=N-1 ---
+    # A[N-1,N-1] = 1 + 2·dt·r[N-2] + dt·(sN + h_v)
+    # A[N-1,N-2] = -2·dt·r[N-2]        → ab[2, N-2]
+    A_banded[1, N - 1] = 1.0 + 2.0 * dt * r[-1] + dt * (sN + h_v)
+    A_banded[2, N - 2] = -2.0 * dt * r[-1]
+    C_vec[N - 1] = dt * Q[N - 1] + dt * T_amb * (h_v + sN)
 
     return A_banded, C_vec
-
-
-def _apply_B(B_diag, B_off, T):
-    """
-    应用 B * T（三对角对称矩阵）。
-
-    B_diag[i]  = B[i, i]
-    B_off[i]   = B[i, i-1] = B[i-1, i]  (i >= 1)
-                （B_off[0] 未使用，恒为 0）
-    """
-    N = len(T)
-    out = B_diag * T
-    # B[i, i-1] * T[i-1]  for i = 1..N-1
-    for i in range(1, N):
-        out[i] += B_off[i] * T[i - 1]
-    # B[i, i+1] * T[i+1]  for i = 0..N-2
-    for i in range(N - 1):
-        out[i] += B_off[i + 1] * T[i + 1]
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -194,9 +217,10 @@ def solve_heat_diffusion(
     """
     统一入口，自动根据规模选择求解器：
       - nodes * n_frames < 50_000：SciPy solve_ivp (RK45) 高精度
-      - 否则：Crank-Nicolson 隐式，无条件稳定、大步长推进
+      - 否则：Backward-Euler 隐式，无条件稳定、大步长推进
     """
     assert Q.shape == (config.nodes,)
+    assert config.alpha.shape == (config.nodes,)
     N = config.nodes
     x_coords = np.linspace(0.0, config.length, N)
 
@@ -213,9 +237,14 @@ def solve_heat_diffusion(
     use_implicit = work_estimate > 50_000 or N >= 200 or n_frames >= 300
 
     if progress_cb:
+        # 统计瑕疵点信息用于展示
+        alpha = config.alpha
+        min_alpha_ratio = alpha.min() / alpha.max() if alpha.max() > 0 else 1.0
+        n_defects = np.sum(alpha < alpha.max() * 0.99)
+        extra = f"，{n_defects} 个瑕疵点" if n_defects > 0 else ""
         progress_cb(
             0.02,
-            f"初始化求解器 ({'Crank-Nicolson 隐式' if use_implicit else 'RK45 自适应'})",
+            f"初始化求解器 ({'Backward-Euler 全隐式' if use_implicit else 'RK45 自适应'}{extra})",
         )
 
     if use_implicit:
@@ -236,7 +265,7 @@ def solve_heat_diffusion(
 
 def _solve_explicit_ivp(config, Q, total_time, time_coords, T0,
                         progress_cb=None, cancel_event=None):
-    """SciPy RK45 求解（默认高精度模式）"""
+    """SciPy RK45 求解（默认高精度模式，支持变系数）"""
     rhs = _build_rhs_vectorized(config, Q)
 
     if progress_cb is None and cancel_event is None:

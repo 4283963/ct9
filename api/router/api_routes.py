@@ -11,7 +11,7 @@ FastAPI 路由层（同步 + 异步任务双模式）
 """
 
 from __future__ import annotations
-from typing import Any
+from typing import Any, Optional
 import threading
 
 from fastapi import APIRouter, HTTPException
@@ -20,6 +20,13 @@ from pydantic import BaseModel, Field
 from api.physics.solver import SimulationParams, run_simulation
 from api.router.matrix_transform import to_frontend_payload
 from api.router.task_manager import TaskManager, TaskStatus
+
+
+class HotspotDefect(BaseModel):
+    nodeIndex: int = Field(ge=0)
+    conductivityMultiplier: float = Field(gt=0.0, le=1.0)
+    efficiencyMultiplier: Optional[float] = Field(default=1.0, ge=0.0, le=1.0)
+    label: Optional[str] = None
 
 
 class SimulateRequest(BaseModel):
@@ -33,9 +40,21 @@ class SimulateRequest(BaseModel):
     refEfficiency: float = Field(default=0.22, ge=0.05, le=0.5)
     tempCoeff: float = Field(default=0.0042, ge=0.0005, le=0.01)
     heatTransferCoeff: float = Field(default=15.0, ge=1.0, le=200.0)
+    hotspots: list[HotspotDefect] = Field(default_factory=list)
 
 
 def _build_params(req: SimulateRequest) -> SimulationParams:
+    from api.physics.solver import HotspotDefect as SolverHotspot
+    hotspots = None
+    if req.hotspots:
+        hotspots = [
+            SolverHotspot(
+                node_index=hs.nodeIndex,
+                conductivity_multiplier=hs.conductivityMultiplier,
+                efficiency_multiplier=hs.efficiencyMultiplier if hs.efficiencyMultiplier is not None else 1.0,
+            )
+            for hs in req.hotspots
+        ]
     return SimulationParams(
         ambient_temp=req.ambientTemp,
         irradiance=req.irradiance,
@@ -47,6 +66,7 @@ def _build_params(req: SimulateRequest) -> SimulationParams:
         ref_efficiency=req.refEfficiency,
         temp_coeff=req.tempCoeff,
         heat_transfer_coeff=req.heatTransferCoeff,
+        hotspots=hotspots,
     )
 
 

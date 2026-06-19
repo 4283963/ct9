@@ -25,6 +25,13 @@ def _k_from_alpha(alpha: float) -> float:
 
 
 @dataclass
+class HotspotDefect:
+    node_index: int
+    conductivity_multiplier: float
+    efficiency_multiplier: float = 1.0
+
+
+@dataclass
 class SimulationParams:
     ambient_temp: float
     irradiance: float
@@ -36,6 +43,7 @@ class SimulationParams:
     ref_efficiency: float
     temp_coeff: float
     heat_transfer_coeff: float
+    hotspots: list[HotspotDefect] | None = None
 
 
 @dataclass
@@ -63,18 +71,27 @@ def run_simulation(
     cancel_event: Optional[threading.Event] = None,
 ) -> SimulationResult:
     nodes = max(5, int(p.nodes))
-    alpha = float(p.alpha)
+    alpha_bulk = float(p.alpha)
     h_surf = float(p.heat_transfer_coeff)
 
-    k_eff = _k_from_alpha(alpha)
-    h_over_k = h_surf / k_eff
+    # 构建位置相关的热扩散系数数组（支持瑕疵点）
+    alpha = np.full(nodes, alpha_bulk, dtype=float)
+    if p.hotspots:
+        for hs in p.hotspots:
+            idx = int(hs.node_index)
+            if 0 <= idx < nodes:
+                mult = max(0.001, float(hs.conductivity_multiplier))
+                alpha[idx] = alpha_bulk * mult
+
+    k_eff = _k_from_alpha(alpha_bulk)
     h_vol = _compute_volumetric_heat_loss(h_surf)
 
     diff_cfg = DiffusionConfig(
         length=float(p.array_length),
         nodes=nodes,
         alpha=alpha,
-        h_over_k=h_over_k,
+        h_surf=h_surf,
+        rho_c=RHO_C,
         h_volumetric=h_vol,
         ambient_temp=float(p.ambient_temp),
     )
@@ -83,6 +100,14 @@ def run_simulation(
         progress_cb(0.0, "生成辐照度分布")
     G_profile = linear_irradiance_profile(nodes, float(p.irradiance), edge_drop=0.28)
 
+    # 构建瑕疵点效率乘数数组（发电失效区域 η 降低，更多能量 → 热）
+    eta_mult = np.ones(nodes, dtype=float)
+    if p.hotspots:
+        for hs in p.hotspots:
+            idx = int(hs.node_index)
+            if 0 <= idx < nodes:
+                eta_mult[idx] = max(0.0, float(hs.efficiency_multiplier))
+
     if cancel_event and cancel_event.is_set():
         raise RuntimeError("任务已取消")
 
@@ -90,7 +115,7 @@ def run_simulation(
         progress_cb(0.01, "计算初始热源")
     T_init_guess = np.full(nodes, float(p.ambient_temp))
     eta_init = cell_efficiency(T_init_guess, G_profile,
-                               float(p.ref_efficiency), float(p.temp_coeff))
+                               float(p.ref_efficiency), float(p.temp_coeff)) * eta_mult
     Q = _compute_volumetric_source(G_profile, eta_init)
 
     if progress_cb:
@@ -113,7 +138,7 @@ def run_simulation(
     eta_matrix = np.empty_like(T_matrix)
     for k, T_k in enumerate(T_matrix):
         eta_matrix[k] = cell_efficiency(T_k, G_profile,
-                                        float(p.ref_efficiency), float(p.temp_coeff))
+                                        float(p.ref_efficiency), float(p.temp_coeff)) * eta_mult
 
     eta_profile = eta_matrix[-1]
 

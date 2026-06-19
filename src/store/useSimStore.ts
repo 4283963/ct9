@@ -4,6 +4,7 @@ import type {
   SimulateResponse,
   SimStatus,
   TaskInfo,
+  HotspotDefect,
 } from "@/types/simulation";
 import {
   isLargeTask,
@@ -11,6 +12,14 @@ import {
   runSimulationAsync,
   cancelTask,
 } from "@/api/client";
+
+export const HOTSPOT_PRESETS: Record<string, { label: string; cond: number; eff: number }> = {
+  bird_dropping: { label: "鸟粪覆盖", cond: 0.05, eff: 0.0 },
+  surface_crack: { label: "表面裂纹", cond: 0.2, eff: 0.3 },
+  dust_cover: { label: "严重积灰", cond: 0.5, eff: 0.6 },
+  delamination: { label: "分层脱粘", cond: 0.1, eff: 0.1 },
+  normal: { label: "正常", cond: 1.0, eff: 1.0 },
+};
 
 const DEFAULT_PARAMS: SimulateParams = {
   ambientTemp: 25.0,
@@ -23,6 +32,7 @@ const DEFAULT_PARAMS: SimulateParams = {
   refEfficiency: 0.22,
   tempCoeff: 0.0042,
   heatTransferCoeff: 15.0,
+  hotspots: [],
 };
 
 interface SimState {
@@ -36,6 +46,9 @@ interface SimState {
   progress: number;
   progressMessage: string;
   isAsyncMode: boolean;
+  hotspots: HotspotDefect[];
+  selectedPreset: keyof typeof HOTSPOT_PRESETS;
+  hotspotEditMode: boolean;
 
   setParams: (patch: Partial<SimulateParams>) => void;
   resetParams: () => void;
@@ -43,6 +56,12 @@ interface SimState {
   cancelSim: () => Promise<void>;
   setCurrentTimeFrame: (index: number) => void;
   togglePlay: () => void;
+  addHotspot: (nodeIndex: number) => void;
+  removeHotspot: (nodeIndex: number) => void;
+  toggleHotspot: (nodeIndex: number) => void;
+  clearHotspots: () => void;
+  setSelectedPreset: (preset: keyof typeof HOTSPOT_PRESETS) => void;
+  setHotspotEditMode: (enabled: boolean) => void;
 }
 
 export const useSimStore = create<SimState>((set, get) => ({
@@ -56,11 +75,26 @@ export const useSimStore = create<SimState>((set, get) => ({
   progress: 0,
   progressMessage: "",
   isAsyncMode: false,
+  hotspots: [],
+  selectedPreset: "bird_dropping",
+  hotspotEditMode: false,
 
   setParams: (patch) =>
-    set((state) => ({ params: { ...state.params, ...patch } })),
+    set((state) => {
+      const newParams = { ...state.params, ...patch };
+      return {
+        params: newParams,
+        hotspots: (patch.hotspots ?? state.hotspots).filter(
+          (h) => h.nodeIndex < newParams.nodes
+        ),
+      };
+    }),
 
-  resetParams: () => set({ params: DEFAULT_PARAMS }),
+  resetParams: () =>
+    set({
+      params: DEFAULT_PARAMS,
+      hotspots: [],
+    }),
 
   cancelSim: async () => {
     const taskId = get().activeTaskId;
@@ -81,8 +115,9 @@ export const useSimStore = create<SimState>((set, get) => ({
   },
 
   runSim: async () => {
-    const { params } = get();
-    const large = isLargeTask(params);
+    const { params, hotspots } = get();
+    const paramsWithHotspots = { ...params, hotspots };
+    const large = isLargeTask(paramsWithHotspots);
 
     set({
       status: large ? "computing-async" : "computing-sync",
@@ -97,7 +132,7 @@ export const useSimStore = create<SimState>((set, get) => ({
     try {
       let result: SimulateResponse;
       if (large) {
-        result = await runSimulationAsync(params, (info: TaskInfo) => {
+        result = await runSimulationAsync(paramsWithHotspots, (info: TaskInfo) => {
           set({
             activeTaskId: info.taskId,
             progress: info.progress,
@@ -111,7 +146,7 @@ export const useSimStore = create<SimState>((set, get) => ({
           }
         });
       } else {
-        result = await runSimulation(params);
+        result = await runSimulation(paramsWithHotspots);
         set({ progress: 1 });
       }
 
@@ -135,4 +170,41 @@ export const useSimStore = create<SimState>((set, get) => ({
   setCurrentTimeFrame: (index) => set({ currentTimeFrame: index }),
 
   togglePlay: () => set((s) => ({ isPlaying: !s.isPlaying })),
+
+  addHotspot: (nodeIndex) => {
+    const { hotspots, selectedPreset, params } = get();
+    if (nodeIndex < 0 || nodeIndex >= params.nodes) return;
+    if (hotspots.some((h) => h.nodeIndex === nodeIndex)) return;
+
+    const preset = HOTSPOT_PRESETS[selectedPreset];
+    const newHotspot: HotspotDefect = {
+      nodeIndex,
+      conductivityMultiplier: preset.cond,
+      efficiencyMultiplier: preset.eff,
+      label: preset.label,
+    };
+    set({ hotspots: [...hotspots, newHotspot] });
+  },
+
+  removeHotspot: (nodeIndex) => {
+    set((state) => ({
+      hotspots: state.hotspots.filter((h) => h.nodeIndex !== nodeIndex),
+    }));
+  },
+
+  toggleHotspot: (nodeIndex) => {
+    const { hotspots } = get();
+    const exists = hotspots.some((h) => h.nodeIndex === nodeIndex);
+    if (exists) {
+      get().removeHotspot(nodeIndex);
+    } else {
+      get().addHotspot(nodeIndex);
+    }
+  },
+
+  clearHotspots: () => set({ hotspots: [] }),
+
+  setSelectedPreset: (preset) => set({ selectedPreset: preset }),
+
+  setHotspotEditMode: (enabled) => set({ hotspotEditMode: enabled }),
 }));

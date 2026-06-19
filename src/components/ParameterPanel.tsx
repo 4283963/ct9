@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import { useSimStore } from "@/store/useSimStore";
+import { useSimStore, HOTSPOT_PRESETS } from "@/store/useSimStore";
 import { isLargeTask } from "@/api/client";
 import {
   Sun,
@@ -16,6 +16,9 @@ import {
   X,
   Server,
   Cpu,
+  AlertTriangle,
+  Pencil,
+  Trash2,
 } from "lucide-react";
 
 interface SliderFieldProps {
@@ -108,6 +111,13 @@ export default function ParameterPanel() {
     progress,
     progressMessage,
     error,
+    hotspots,
+    selectedPreset,
+    hotspotEditMode,
+    setSelectedPreset,
+    setHotspotEditMode,
+    removeHotspot,
+    clearHotspots,
   } = useSimStore();
 
   const computing =
@@ -321,6 +331,118 @@ export default function ParameterPanel() {
             onChange={(v) => setParams({ tempCoeff: v })}
             format={(v) => v.toFixed(4)}
           />
+        </ParamSection>
+
+        <ParamSection title="热斑瑕疵点">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-mono-300 font-mono flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 text-accent-amber" />
+                瑕疵点预设
+              </span>
+              <button
+                onClick={() => setHotspotEditMode(!hotspotEditMode)}
+                className={cn(
+                  "text-[10px] font-mono px-2 py-1 rounded border flex items-center gap-1.5 transition-all",
+                  hotspotEditMode
+                    ? "bg-accent-rose/20 text-accent-rose border-accent-rose/40"
+                    : "bg-bg-panel2 text-mono-300 border-border-subtle hover:border-mono-500"
+                )}
+              >
+                <Pencil className="w-3 h-3" />
+                {hotspotEditMode ? "退出编辑" : "在图上点选"}
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-1.5">
+              {(Object.keys(HOTSPOT_PRESETS) as Array<keyof typeof HOTSPOT_PRESETS>).map(
+                (key) => {
+                  const preset = HOTSPOT_PRESETS[key];
+                  const active = selectedPreset === key;
+                  const severityColor =
+                    key === "bird_dropping"
+                      ? "border-accent-rose/50 text-accent-rose"
+                      : key === "delamination"
+                      ? "border-accent-orange/50 text-accent-orange"
+                      : key === "surface_crack"
+                      ? "border-accent-amber/50 text-accent-amber"
+                      : "border-mono-500 text-mono-300";
+                  return (
+                    <button
+                      key={key}
+                      onClick={() => setSelectedPreset(key)}
+                      className={cn(
+                        "text-[10px] font-mono py-1.5 px-2 rounded border text-left transition-all",
+                        active
+                          ? cn(severityColor, "bg-current/10")
+                          : "border-border-subtle text-mono-400 hover:border-mono-500"
+                      )}
+                    >
+                      <div className="font-medium">{preset.label}</div>
+                      <div className="text-[9px] opacity-70">
+                        k×{preset.cond} η×{preset.eff}
+                      </div>
+                    </button>
+                  );
+                }
+              )}
+            </div>
+
+            {hotspots.length > 0 ? (
+              <div className="space-y-1 max-h-32 overflow-y-auto">
+                {hotspots
+                  .sort((a, b) => a.nodeIndex - b.nodeIndex)
+                  .map((hs) => (
+                    <div
+                      key={hs.nodeIndex}
+                      className="flex items-center justify-between px-2 py-1.5 rounded bg-bg-panel2 border border-border-subtle group"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span
+                          className="w-2 h-2 rounded-full"
+                          style={{
+                            background:
+                              hs.conductivityMultiplier < 0.2
+                                ? "#ff2d55"
+                                : hs.conductivityMultiplier < 0.5
+                                ? "#ff9500"
+                                : "#ffcc00",
+                          }}
+                        />
+                        <span className="text-[11px] font-mono text-mono-200">
+                          #{hs.nodeIndex}
+                        </span>
+                        <span className="text-[10px] font-mono text-mono-400">
+                          {hs.label}
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => removeHotspot(hs.nodeIndex)}
+                        className="opacity-0 group-hover:opacity-100 text-mono-500 hover:text-accent-rose transition-all"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+              </div>
+            ) : (
+              <div className="text-[10px] font-mono text-mono-500 text-center py-2 border border-dashed border-border-subtle rounded">
+                {hotspotEditMode
+                  ? "点击右侧热力图的列添加瑕疵点"
+                  : "点击「在图上点选」开始添加瑕疵点"}
+              </div>
+            )}
+
+            {hotspots.length > 0 && (
+              <button
+                onClick={clearHotspots}
+                className="w-full text-[10px] font-mono text-mono-500 hover:text-accent-rose py-1 flex items-center justify-center gap-1.5 transition-all"
+              >
+                <Trash2 className="w-3 h-3" />
+                清除所有瑕疵点
+              </button>
+            )}
+          </div>
         </ParamSection>
       </div>
 

@@ -1,3 +1,10 @@
+export interface HotspotDefect {
+  nodeIndex: number;
+  conductivityMultiplier: number;
+  efficiencyMultiplier?: number;
+  label?: string;
+}
+
 export interface SimulateParams {
   ambientTemp: number;
   irradiance: number;
@@ -9,6 +16,7 @@ export interface SimulateParams {
   refEfficiency: number;
   tempCoeff: number;
   heatTransferCoeff: number;
+  hotspots: HotspotDefect[];
 }
 
 export interface SimMetrics {
